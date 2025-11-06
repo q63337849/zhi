@@ -28,6 +28,7 @@ sys.path.append(os.path.dirname(__file__))
 from common.buffers import ReplayBufferLSTM2
 from common.value_networks import QNetworkLSTM2
 from common.policy_networks import DPG_PolicyNetworkLSTM2
+from common.path_env_gpt import CurriculumRobotEnv
 from gymnasium import spaces
 
 # GPU设置
@@ -134,19 +135,29 @@ class RDPG():
 
 class NormalizedActions(gym.ActionWrapper):
     """动作归一化包装器"""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self._orig_low = self.env.action_space.low
+        self._orig_high = self.env.action_space.high
+        self.action_space = spaces.Box(
+            low=-np.ones_like(self._orig_low, dtype=np.float32),
+            high=np.ones_like(self._orig_high, dtype=np.float32),
+            dtype=np.float32,
+        )
+
     def action(self, action):
-        low = self.action_space.low
-        high = self.action_space.high
-        action = low + (action + 1.0) * 0.5 * (high - low)
-        action = np.clip(action, low, high)
-        return action
+        action = np.clip(action, self.action_space.low, self.action_space.high)
+        low = self._orig_low
+        high = self._orig_high
+        scaled_action = low + (action + 1.0) * 0.5 * (high - low)
+        return np.clip(scaled_action, low, high)
 
     def reverse_action(self, action):
-        low = self.action_space.low
-        high = self.action_space.high
-        action = 2 * (action - low) / (high - low) - 1
-        action = np.clip(action, low, high)
-        return action
+        low = self._orig_low
+        high = self._orig_high
+        normalized_action = 2 * (action - low) / (high - low) - 1
+        return np.clip(normalized_action, self.action_space.low, self.action_space.high)
 
 
 class TrainingVisualizer:
@@ -294,11 +305,16 @@ def train(args):
     print("开始训练RDPG算法")
     print("="*60)
     
-    # 创建环境
-    env = NormalizedActions(gym.make("Pendulum-v1"))
+    # 创建环境（动态场景路径规划）
+    env_base = CurriculumRobotEnv(
+        scene_id=args.scene_id,
+        max_steps=args.max_steps,
+        map_size=args.map_size,
+    )
+    env = NormalizedActions(env_base)
     action_space = env.action_space
     state_space = env.observation_space
-    
+
     print(f"状态空间: {state_space.shape}")
     print(f"动作空间: {action_space.shape}")
     
@@ -325,6 +341,8 @@ def train(args):
     print(f"  - Batch size: {batch_size}")
     print(f"  - Hidden dim: {hidden_dim}")
     print(f"  - Replay buffer size: {replay_buffer_size}")
+    print(f"  - 场景编号: {args.scene_id}")
+    print(f"  - 地图尺寸: {args.map_size}")
     print(f"  - 可视化: {'禁用' if not enable_plot else '启用'}")
     print()
     
@@ -336,7 +354,7 @@ def train(args):
         policy_loss_list = []
         
         state, _ = env.reset()
-        last_action = env.action_space.sample()
+        last_action = np.zeros(env.action_space.shape, dtype=np.float32)
         
         episode_state = []
         episode_action = []
@@ -423,9 +441,16 @@ def test(args):
     print("="*60)
     
     # 创建环境
-    env = NormalizedActions(gym.make("Pendulum-v1", render_mode="human" if args.render else None))
+    env_base = CurriculumRobotEnv(
+        scene_id=args.scene_id,
+        max_steps=args.max_steps,
+        map_size=args.map_size,
+        render_mode="human" if args.render else None,
+    )
+    env = NormalizedActions(env_base)
     action_space = env.action_space
     state_space = env.observation_space
+    print(f"测试环境: 场景 {args.scene_id}, 地图尺寸 {args.map_size}, 渲染={'开启' if args.render else '关闭'}")
     
     # 超参数
     hidden_dim = 64
@@ -450,7 +475,7 @@ def test(args):
     
     for i_episode in range(test_episodes):
         state, _ = env.reset()
-        last_action = np.zeros(action_space.shape[0])
+        last_action = np.zeros(action_space.shape, dtype=np.float32)
         hidden_out = (torch.zeros([1, 1, hidden_dim], dtype=torch.float).to(device),
                      torch.zeros([1, 1, hidden_dim], dtype=torch.float).to(device))
         
@@ -493,7 +518,9 @@ def main():
     parser.add_argument('--test', action='store_true', help='测试模式')
     parser.add_argument('--episodes', type=int, default=500, help='训练回合数')
     parser.add_argument('--test_episodes', type=int, default=10, help='测试回合数')
-    parser.add_argument('--max_steps', type=int, default=100, help='每回合最大步数')
+    parser.add_argument('--max_steps', type=int, default=150, help='每回合最大步数')
+    parser.add_argument('--scene-id', type=int, default=4, help='路径规划场景编号（4 为动态障碍场景）')
+    parser.add_argument('--map_size', type=float, default=10.0, help='地图大小')
     parser.add_argument('--render', action='store_true', help='测试时渲染环境')
     parser.add_argument('--no-plot', action='store_true', help='禁用训练可视化（加快速度）')
     
