@@ -18,7 +18,6 @@ from matplotlib.animation import FuncAnimation
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import gymnasium as gym
 from datetime import datetime
 import time
 
@@ -28,7 +27,8 @@ sys.path.append(os.path.dirname(__file__))
 from common.buffers import ReplayBufferLSTM2
 from common.value_networks import QNetworkLSTM2
 from common.policy_networks import DPG_PolicyNetworkLSTM2
-from gymnasium import spaces
+from common.path_env_gpt import CurriculumRobotEnv
+from gymnasium import ActionWrapper
 
 # GPU设置
 GPU = torch.cuda.is_available()
@@ -132,21 +132,20 @@ class RDPG():
         print(f"模型已加载: {path}")
 
 
-class NormalizedActions(gym.ActionWrapper):
-    """动作归一化包装器"""
+class NormalizedActions(ActionWrapper):
+    """动作归一化包装器，将策略输出的[-1, 1]动作映射到环境动作空间"""
+
     def action(self, action):
         low = self.action_space.low
         high = self.action_space.high
         action = low + (action + 1.0) * 0.5 * (high - low)
-        action = np.clip(action, low, high)
-        return action
+        return np.clip(action, low, high)
 
     def reverse_action(self, action):
         low = self.action_space.low
         high = self.action_space.high
         action = 2 * (action - low) / (high - low) - 1
-        action = np.clip(action, low, high)
-        return action
+        return np.clip(action, -1.0, 1.0)
 
 
 class TrainingVisualizer:
@@ -295,7 +294,12 @@ def train(args):
     print("="*60)
     
     # 创建环境
-    env = NormalizedActions(gym.make("Pendulum-v1"))
+    env = NormalizedActions(
+        CurriculumRobotEnv(
+            scene_id=args.scene_id,
+            max_steps=args.max_steps,
+        )
+    )
     action_space = env.action_space
     state_space = env.observation_space
     
@@ -423,7 +427,13 @@ def test(args):
     print("="*60)
     
     # 创建环境
-    env = NormalizedActions(gym.make("Pendulum-v1", render_mode="human" if args.render else None))
+    env = NormalizedActions(
+        CurriculumRobotEnv(
+            scene_id=args.scene_id,
+            max_steps=args.max_steps,
+            render_mode="human" if args.render else None,
+        )
+    )
     action_space = env.action_space
     state_space = env.observation_space
     
@@ -493,9 +503,10 @@ def main():
     parser.add_argument('--test', action='store_true', help='测试模式')
     parser.add_argument('--episodes', type=int, default=500, help='训练回合数')
     parser.add_argument('--test_episodes', type=int, default=10, help='测试回合数')
-    parser.add_argument('--max_steps', type=int, default=100, help='每回合最大步数')
+    parser.add_argument('--max_steps', type=int, default=150, help='每回合最大步数')
     parser.add_argument('--render', action='store_true', help='测试时渲染环境')
     parser.add_argument('--no-plot', action='store_true', help='禁用训练可视化（加快速度）')
+    parser.add_argument('--scene_id', type=int, default=4, help='场景编号 (1-4)，4 含动态障碍物')
     
     args = parser.parse_args()
     
