@@ -113,17 +113,25 @@ class RDPG():
         # reward = reward_scale * (reward - reward.mean(dim=0)) /reward.std(dim=0) # normalize with batch mean and std
 
         q_loss = self.q_criterion(predict_q, target_q.detach())
-        policy_loss = -torch.mean(predict_new_q)
 
         # train qnet
         self.q_optimizer.zero_grad()
-        q_loss.backward(retain_graph=True)  # no need for retain_graph here actually
+        q_loss.backward()
         self.q_optimizer.step()
 
-        # train policy_net     
+        for param in self.qnet.parameters():
+            param.requires_grad = False
+
+        predict_new_q, _ = self.qnet(state, new_action, last_action, hidden_in)
+        policy_loss = -torch.mean(predict_new_q)
+
+        # train policy_net
         self.policy_optimizer.zero_grad()
-        policy_loss.backward(retain_graph=True)
+        policy_loss.backward()
         self.policy_optimizer.step()
+
+        for param in self.qnet.parameters():
+            param.requires_grad = True
 
             
         # update the target_qnet
