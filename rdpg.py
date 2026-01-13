@@ -230,6 +230,8 @@ if __name__ == '__main__':
             reset_out = env.reset()
             state = reset_out[0] if isinstance(reset_out, tuple) else reset_out
             episode_reward = 0
+            episode_steps = 0
+            episode_success = False
             last_action = np.zeros(action_space.shape[0], dtype=np.float32)
             episode_state = []
             episode_action = []
@@ -247,10 +249,10 @@ if __name__ == '__main__':
 
                 step_out = env.step(action)
                 if len(step_out) == 5:
-                    next_state, reward, terminated, truncated, _ = step_out
+                    next_state, reward, terminated, truncated, info = step_out
                     done = terminated or truncated
                 else:
-                    next_state, reward, done, _ = step_out
+                    next_state, reward, done, info = step_out
                 if step==0:
                     ini_hidden_in = hidden_in
                     ini_hidden_out = hidden_out
@@ -264,6 +266,9 @@ if __name__ == '__main__':
                 state = next_state
                 last_action = action
                 frame_idx += 1
+                episode_steps += 1
+                if isinstance(info, dict) and info.get('success'):
+                    episode_success = True
                 if len(replay_buffer) > batch_size:
                     for _ in range(update_itr):
                         q_loss, policy_loss = alg.update(batch_size)
@@ -291,7 +296,9 @@ if __name__ == '__main__':
                 alg.save_model(model_path)
             q_loss_mean = np.average(q_loss_list) if q_loss_list else 0.0
             policy_loss_mean = np.average(policy_loss_list) if policy_loss_list else 0.0
-            print('Eps: ', i_episode, '| Reward: ', np.sum(episode_reward), '| Loss: ', q_loss_mean, policy_loss_mean)
+            success_rate = 1.0 if episode_success else 0.0
+            print('Eps: ', i_episode, '| Reward: ', np.sum(episode_reward), '| Steps: ', episode_steps,
+                '| Success: ', success_rate, '| Loss: ', q_loss_mean, policy_loss_mean)
             replay_buffer.push(ini_hidden_in, ini_hidden_out, episode_state, episode_action, episode_last_action, \
                 episode_reward, episode_next_state, episode_done)
 
