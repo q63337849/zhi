@@ -25,9 +25,9 @@ from common.utils import *
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from IPython.display import display
-from reacher import Reacher
 import argparse
 from gym import spaces
+from path_env_sim2real1 import Sim2RealEnv
 
 
 GPU = True
@@ -48,6 +48,9 @@ class RDPG():
     def __init__(self, replay_buffer, state_space, action_space, hidden_dim):
         self.replay_buffer = replay_buffer
         self.hidden_dim = hidden_dim
+        self.action_space = action_space
+        self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32, device=device)
+        self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32, device=device)
         # single-branch network structure as in 'Memory-based control with recurrent neural networks'
         self.qnet = QNetworkLSTM2(state_space, action_space, hidden_dim).to(device)
         self.target_qnet = QNetworkLSTM2(state_space, action_space, hidden_dim).to(device)
@@ -72,6 +75,10 @@ class RDPG():
 
         self.q_optimizer = optim.Adam(self.qnet.parameters(), lr=q_lr)
         self.policy_optimizer = optim.Adam(self.policy_net.parameters(), lr=policy_lr)
+
+    def _scale_action(self, action):
+        action = torch.clamp(action, -1.0, 1.0)
+        return self.action_low + (action + 1.0) * 0.5 * (self.action_high - self.action_low)
     
     def target_soft_update(self, net, target_net, soft_tau):
     # Soft update the target net
@@ -96,7 +103,9 @@ class RDPG():
         # use hidden states stored in the memory for initialization, hidden_in for current, hidden_out for target
         predict_q, _ = self.qnet(state, action, last_action, hidden_in) # for q 
         new_action, _ = self.policy_net.evaluate(state, last_action, hidden_in) # for policy
+        new_action = self._scale_action(new_action)
         new_next_action, _ = self.target_policy_net.evaluate(next_state, action, hidden_out)  # for q
+        new_next_action = self._scale_action(new_next_action)
         predict_target_q, _ = self.target_qnet(next_state, new_next_action, action, hidden_out)  # for q
 
         predict_new_q, _ = self.qnet(state, new_action, last_action, hidden_in) # for policy. as optimizers are separated, no detach for q_h_in is also fine
@@ -145,9 +154,21 @@ def plot(rewards):
     plt.clf()
 
 class NormalizedActions(gym.ActionWrapper): # gym env wrapper
+    def __init__(self, env):
+        super().__init__(env)
+        self._action_low = env.action_space.low
+        self._action_high = env.action_space.high
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=env.action_space.shape, dtype=np.float32)
+
+    def action(self, action):
+        return self._action(action)
+
+    def reverse_action(self, action):
+        return self._reverse_action(action)
+
     def _action(self, action):
-        low  = self.action_space.low
-        high = self.action_space.high
+        low  = self._action_low
+        high = self._action_high
         
         action = low + (action + 1.0) * 0.5 * (high - low)
         action = np.clip(action, low, high)
@@ -155,11 +176,11 @@ class NormalizedActions(gym.ActionWrapper): # gym env wrapper
         return action
 
     def _reverse_action(self, action):
-        low  = self.action_space.low
-        high = self.action_space.high
+        low  = self._action_low
+        high = self._action_high
         
         action = 2 * (action - low) / (high - low) - 1
-        action = np.clip(action, low, high)
+        action = np.clip(action, -1.0, 1.0)
         
         return action
 
@@ -171,18 +192,11 @@ if __name__ == '__main__':
     SCREEN_SIZE=1000
     # SPARSE_REWARD=False
     # SCREEN_SHOT=False
-    ENV = ['Pendulum', 'Reacher'][0]
-    if ENV == 'Reacher':
-        env=Reacher(screen_size=SCREEN_SIZE, num_joints=NUM_JOINTS, link_lengths = LINK_LENGTH, \
-        ini_joint_angles=INI_JOING_ANGLES, target_pos = [369,430], render=True)
-        action_space = spaces.Box(low=-1.0, high=1.0, shape=(env.num_actions,), dtype=np.float32)
-        state_space  = spaces.Box(low=-np.inf, high=np.inf, shape=(env.num_observations, ))
-
-    elif ENV == 'Pendulum':
-        env = NormalizedActions(gym.make("Pendulum-v0"))
-        # env = gym.make("Pendulum-v0")
-        action_space = env.action_space
-        state_space  = env.observation_space
+    ENV = 'Sim2Real'
+    max_steps = 400
+    env = Sim2RealEnv(scene_id=6, max_steps=max_steps, render_mode=None, num_dynamic=4)
+    action_space = env.action_space
+    state_space = env.observation_space
     hidden_dim = 64
     explore_steps = 0  # for random exploration
     batch_size = 3  # each sample in batch is an episode for lstm policy (normally it's timestep)
@@ -199,16 +213,16 @@ if __name__ == '__main__':
 
         # hyper-parameters
         max_episodes  = 1000
-        max_steps   = 100
         frame_idx   = 0
         rewards=[]
 
         for i_episode in range (max_episodes):
             q_loss_list=[]
             policy_loss_list=[]
-            state = env.reset()
+            reset_out = env.reset()
+            state = reset_out[0] if isinstance(reset_out, tuple) else reset_out
             episode_reward = 0
-            last_action = env.action_space.sample()
+            last_action = np.zeros(action_space.shape[0], dtype=np.float32)
             episode_state = []
             episode_action = []
             episode_last_action = []
@@ -220,11 +234,15 @@ if __name__ == '__main__':
             
             for step in range(max_steps):
                 hidden_in = hidden_out
-                action, hidden_out = alg.policy_net.get_action(state, last_action, hidden_in)
+                action_norm, hidden_out = alg.policy_net.get_action(state, last_action, hidden_in)
+                action = alg._scale_action(torch.as_tensor(action_norm, dtype=torch.float32, device=device)).detach().cpu().numpy()
 
-                next_state, reward, done, _ = env.step(action)
-                if ENV !='Reacher':
-                    env.render()
+                step_out = env.step(action)
+                if len(step_out) == 5:
+                    next_state, reward, terminated, truncated, _ = step_out
+                    done = terminated or truncated
+                else:
+                    next_state, reward, done, _ = step_out
                 if step==0:
                     ini_hidden_in = hidden_in
                     ini_hidden_out = hidden_out
@@ -259,13 +277,14 @@ if __name__ == '__main__':
 
     if args.test:
         test_episodes = 10
-        max_steps=100
+        max_steps = 400
         alg.load_model(model_path)
 
         for i_episode in range (test_episodes):
             q_loss_list=[]
             policy_loss_list=[]
-            state = env.reset()
+            reset_out = env.reset()
+            state = reset_out[0] if isinstance(reset_out, tuple) else reset_out
             episode_reward = 0
             last_action = np.zeros(action_space.shape[0])
             hidden_out = (torch.zeros([1, 1, hidden_dim], dtype=torch.float).cuda(), \
@@ -273,10 +292,14 @@ if __name__ == '__main__':
             
             for step in range(max_steps):
                 hidden_in = hidden_out
-                action, hidden_out= alg.policy_net.get_action(state, last_action, hidden_in, noise_scale=0.0)  # no noise for testing
-                next_state, reward, done, _ = env.step(action)
-                env.render()
-                
+                action_norm, hidden_out= alg.policy_net.get_action(state, last_action, hidden_in, noise_scale=0.0)  # no noise for testing
+                action = alg._scale_action(torch.as_tensor(action_norm, dtype=torch.float32, device=device)).detach().cpu().numpy()
+                step_out = env.step(action)
+                if len(step_out) == 5:
+                    next_state, reward, terminated, truncated, _ = step_out
+                    done = terminated or truncated
+                else:
+                    next_state, reward, done, _ = step_out
                 last_action = action
                 state = next_state
                 episode_reward += reward
