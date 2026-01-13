@@ -93,12 +93,12 @@ class RDPG():
         self.update_cnt+=1
         hidden_in, hidden_out, state, action, last_action, reward, next_state, done = self.replay_buffer.sample(batch_size)
         # print('sample:', state, action,  reward, done)
-        state      = torch.FloatTensor(state).to(device)
-        next_state = torch.FloatTensor(next_state).to(device)
-        action     = torch.FloatTensor(action).to(device)
-        last_action     = torch.FloatTensor(last_action).to(device)
-        reward     = torch.FloatTensor(reward).unsqueeze(-1).to(device)  
-        done       = torch.FloatTensor(np.float32(done)).unsqueeze(-1).to(device)
+        state      = torch.FloatTensor(np.asarray(state)).to(device)
+        next_state = torch.FloatTensor(np.asarray(next_state)).to(device)
+        action     = torch.FloatTensor(np.asarray(action)).to(device)
+        last_action     = torch.FloatTensor(np.asarray(last_action)).to(device)
+        reward     = torch.FloatTensor(np.asarray(reward)).unsqueeze(-1).to(device)  
+        done       = torch.FloatTensor(np.asarray(done, dtype=np.float32)).unsqueeze(-1).to(device)
 
         # use hidden states stored in the memory for initialization, hidden_in for current, hidden_out for target
         predict_q, _ = self.qnet(state, action, last_action, hidden_in) # for q 
@@ -261,13 +261,29 @@ if __name__ == '__main__':
                         q_loss, policy_loss = alg.update(batch_size)
                         q_loss_list.append(q_loss)
                         policy_loss_list.append(policy_loss)
-                if done:  # should not break for lstm cases to make every episode with same length
-                    break        
+                if done:
+                    break
+
+            if len(episode_state) < max_steps:
+                pad_len = max_steps - len(episode_state)
+                pad_state = episode_state[-1]
+                pad_next_state = episode_next_state[-1]
+                pad_action = episode_action[-1]
+                pad_last_action = episode_last_action[-1]
+                for _ in range(pad_len):
+                    episode_state.append(pad_state)
+                    episode_action.append(pad_action)
+                    episode_last_action.append(pad_last_action)
+                    episode_reward.append(0.0)
+                    episode_next_state.append(pad_next_state)
+                    episode_done.append(True)
 
             if i_episode % 20 == 0:
                 plot(rewards)
                 alg.save_model(model_path)
-            print('Eps: ', i_episode, '| Reward: ', np.sum(episode_reward), '| Loss: ', np.average(q_loss_list), np.average(policy_loss_list))
+            q_loss_mean = np.average(q_loss_list) if q_loss_list else 0.0
+            policy_loss_mean = np.average(policy_loss_list) if policy_loss_list else 0.0
+            print('Eps: ', i_episode, '| Reward: ', np.sum(episode_reward), '| Loss: ', q_loss_mean, policy_loss_mean)
             replay_buffer.push(ini_hidden_in, ini_hidden_out, episode_state, episode_action, episode_last_action, \
                 episode_reward, episode_next_state, episode_done)
 
